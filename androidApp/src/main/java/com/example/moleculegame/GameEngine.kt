@@ -17,8 +17,6 @@ internal fun computeCaptures(
     val opponent = if (player == Player.PLAYER1) Player.PLAYER2 else Player.PLAYER1
     val directions = listOf(Pair(1, 0), Pair(-1, 0), Pair(0, 1), Pair(0, -1))
     
-    // OPTIMISATION MAJEURE : On calcule la boîte englobante des pions. 
-    // Si la recherche sort de cette boîte, ça veut dire qu'elle atteint forcément le bord de l'écran car rien ne la bloque.
     val minX = electrons.minOfOrNull { it.position.x } ?: 0
     val maxX = electrons.maxOfOrNull { it.position.x } ?: boardSize
     val minY = electrons.minOfOrNull { it.position.y } ?: 0
@@ -58,7 +56,6 @@ internal fun computeCaptures(
                 if (nPos.x < 0 || nPos.x > boardSize || nPos.y < 0 || nPos.y > boardSize) {
                     escapes = true
                 } else if (nPos.x < minX || nPos.x > maxX || nPos.y < minY || nPos.y > maxY) {
-                    // La case est en dehors des pions existants, donc elle file librement vers le bord !
                     escapes = true
                 } else if (!visited.contains(nPos)) {
                     val nElectron = simulatedElectrons.find { it.position == nPos && !it.isCaptured }
@@ -70,10 +67,15 @@ internal fun computeCaptures(
                     }
                 }
             }
-            if (escapes) break // Si ça fuit, inutile de continuer l'exploration, ce groupe n'est pas capturé !
+            if (escapes) break
         }
 
-        if (!escapes) {
+        // RÈGLE : Si la zone encerclée contient au moins un électron de la MÊME couleur (joueur captureur), la capture est impossible !
+        val hasSameColorInside = simulatedElectrons.any { e ->
+            !e.isCaptured && e.owner == player && e.position in visited && e.position !in boundary
+        }
+
+        if (!escapes && !hasSameColorInside) {
             totallyEnclosedVisited.addAll(visited)
             if (enclosedOpponents.isNotEmpty()) {
                 boundary.add(lastMove) 
@@ -91,6 +93,64 @@ internal fun computeCaptures(
     }
 
     return Pair(totalCaptures, simulatedElectrons)
+}
+
+internal fun checkPlacedInOpponentEnclosure(
+    boardSize: Int,
+    electrons: List<Electron>,
+    placedElectron: Electron
+): Pair<Boolean, List<Position>> {
+    val player = placedElectron.owner
+    val opponent = if (player == Player.PLAYER1) Player.PLAYER2 else Player.PLAYER1
+    val startPos = placedElectron.position
+
+    val minX = electrons.minOfOrNull { it.position.x } ?: 0
+    val maxX = electrons.maxOfOrNull { it.position.x } ?: boardSize
+    val minY = electrons.minOfOrNull { it.position.y } ?: 0
+    val maxY = electrons.maxOfOrNull { it.position.y } ?: boardSize
+
+    val directions = listOf(Pair(1, 0), Pair(-1, 0), Pair(0, 1), Pair(0, -1))
+    val queue = ArrayDeque<Position>()
+    val visited = mutableSetOf<Position>()
+    val boundary = mutableSetOf<Position>()
+    var escapes = false
+
+    queue.add(startPos)
+    visited.add(startPos)
+
+    while (queue.isNotEmpty()) {
+        val curr = queue.removeFirst()
+
+        for ((ndx, ndy) in directions) {
+            val nPos = Position(curr.x + ndx, curr.y + ndy)
+
+            if (nPos.x < 0 || nPos.x > boardSize || nPos.y < 0 || nPos.y > boardSize) {
+                escapes = true
+            } else if (nPos.x < minX || nPos.x > maxX || nPos.y < minY || nPos.y > maxY) {
+                escapes = true
+            } else if (!visited.contains(nPos)) {
+                val nElectron = electrons.find { it.position == nPos && !it.isCaptured }
+                if (nElectron != null && nElectron.owner == opponent) {
+                    boundary.add(nPos)
+                } else {
+                    visited.add(nPos)
+                    queue.add(nPos)
+                }
+            }
+        }
+        if (escapes) break
+    }
+
+    if (!escapes) {
+        val hasOpponentInside = electrons.any { e ->
+            !e.isCaptured && e.owner == opponent && e.position in visited && e.position !in boundary
+        }
+        if (!hasOpponentInside) {
+            return Pair(true, boundary.toList())
+        }
+    }
+
+    return Pair(false, emptyList())
 }
 
 internal fun hasLiberties(boardSize: Int, electrons: List<Electron>, startPos: Position, player: Player): Boolean {
@@ -128,77 +188,9 @@ internal fun hasLiberties(boardSize: Int, electrons: List<Electron>, startPos: P
 }
 
 internal fun reviveElectrons(boardSize: Int, electrons: List<Electron>, scores: MutableMap<Player, Int>): List<Electron> {
-    var currentElectrons = electrons.toList()
-    var changed = true
-    
-    val minX = electrons.minOfOrNull { it.position.x } ?: 0
-    val maxX = electrons.maxOfOrNull { it.position.x } ?: boardSize
-    val minY = electrons.minOfOrNull { it.position.y } ?: 0
-    val maxY = electrons.maxOfOrNull { it.position.y } ?: boardSize
-
-    while (changed) {
-        changed = false
-        val deadElectrons = currentElectrons.filter { it.isCaptured }
-        
-        for (dead in deadElectrons) {
-            if (!currentElectrons.find { it.id == dead.id }!!.isCaptured) continue
-            
-            val player = dead.owner
-            val opponent = if (player == Player.PLAYER1) Player.PLAYER2 else Player.PLAYER1
-            
-            val queue = ArrayDeque<Position>()
-            val visited = mutableSetOf<Position>()
-            val groupToRevive = mutableListOf<Electron>()
-            
-            queue.add(dead.position)
-            visited.add(dead.position)
-            
-            var escapes = false
-            val directions = listOf(Pair(1, 0), Pair(-1, 0), Pair(0, 1), Pair(0, -1))
-            
-            while(queue.isNotEmpty()) {
-                val curr = queue.removeFirst()
-                val e = currentElectrons.find { it.position == curr }
-                if (e != null && e.owner == player && e.isCaptured) {
-                    groupToRevive.add(e)
-                }
-                
-                for ((dx, dy) in directions) {
-                    val nPos = Position(curr.x + dx, curr.y + dy)
-                    if (nPos.x < 0 || nPos.x > boardSize || nPos.y < 0 || nPos.y > boardSize) {
-                        escapes = true
-                        break
-                    } else if (nPos.x < minX || nPos.x > maxX || nPos.y < minY || nPos.y > maxY) {
-                        escapes = true
-                        break
-                    } else if (!visited.contains(nPos)) {
-                        val nElectron = currentElectrons.find { it.position == nPos && !it.isCaptured }
-                        if (nElectron != null && nElectron.owner == opponent) {
-                            // Mur ennemi vivant
-                        } else {
-                            visited.add(nPos)
-                            queue.add(nPos)
-                        }
-                    }
-                }
-                if (escapes) break
-            }
-            
-            if (escapes) {
-                scores[opponent] = (scores[opponent] ?: 0) - groupToRevive.size
-                currentElectrons = currentElectrons.map { el ->
-                    if (groupToRevive.any { it.id == el.id }) {
-                        el.copy(isCaptured = false, capturerPolygon = null)
-                    } else {
-                        el
-                    }
-                }
-                changed = true
-                break
-            }
-        }
-    }
-    return currentElectrons
+    // RÈGLE : Une fois un territoire encerclé, il le reste jusqu'à la fin du jeu.
+    // Quand l'adversaire entoure un territoire déjà encerclé, les traits d'encerclement intérieurs sont conservés de façon permanente.
+    return electrons
 }
 
 class GameEngine(private val initialLevel: Int = 1, private val initialBoardSize: Int = 50) {
@@ -229,15 +221,38 @@ class GameEngine(private val initialLevel: Int = 1, private val initialBoardSize
             var score2 = currentState.scores[Player.PLAYER2] ?: 0
 
             // 1. Calcul des captures
-            val (captures, newElectrons) = computeCaptures(
+            var (captures, newElectrons) = computeCaptures(
                 boardSize = currentState.boardSize,
                 electrons = currentState.electrons + newElectron,
                 lastMove = position,
                 player = currentPlayer
             )
 
+            val opponent = if (currentPlayer == Player.PLAYER1) Player.PLAYER2 else Player.PLAYER1
+
             if (captures > 0) {
                 if (currentPlayer == Player.PLAYER1) score1 += captures else score2 += captures
+            } else {
+                // RÈGLE : Si le joueur pose un électron dans un champ DÉJÀ encerclé par l'adversaire,
+                // l'électron est immédiatement capturé et le trait d'encerclement s'affiche tout de suite !
+                val placedElectronInList = newElectrons.find { it.id == newElectron.id } ?: newElectron
+                if (!placedElectronInList.isCaptured) {
+                    val (isInOpponentTerritory, oppBoundary) = checkPlacedInOpponentEnclosure(
+                        boardSize = currentState.boardSize,
+                        electrons = newElectrons,
+                        placedElectron = placedElectronInList
+                    )
+                    if (isInOpponentTerritory) {
+                        newElectrons = newElectrons.map { el ->
+                            if (el.id == newElectron.id) {
+                                el.copy(isCaptured = true, capturerPolygon = oppBoundary)
+                            } else {
+                                el
+                            }
+                        }
+                        if (opponent == Player.PLAYER1) score1 += 1 else score2 += 1
+                    }
+                }
             }
             
             // 2. Libération des électrons si leurs ravisseurs ont été capturés
@@ -297,44 +312,46 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
         val candidates = adjacentPositions.toList()
         if (candidates.isEmpty()) return null
 
-        if (difficulty == 1) {
-            return candidates.random()
-        }
-
-        // Pour les niveaux 9 et 10 : Utilisation de l'IA Imbattable (Minimax + Alpha-Beta + Mémoïsation + Limite de Temps)
-        if (difficulty >= 9) {
-            val timeLimitMs = 1500L
-            val startTime = System.currentTimeMillis()
-            transpositionTable.clear()
-
-            var bestMove: Position? = null
-            var targetDepth = 1
-            val maxDepthAllowed = if (difficulty == 10) 8 else 5
-
-            while (targetDepth <= maxDepthAllowed && System.currentTimeMillis() - startTime < timeLimitMs) {
-                try {
-                    val move = searchBestMoveAtDepth(
-                        state = state,
-                        candidates = candidates,
-                        depth = targetDepth,
-                        aiPlayer = player,
-                        startTime = startTime,
-                        timeLimitMs = timeLimitMs
-                    )
-                    if (move != null) {
-                        bestMove = move
-                    }
-                    targetDepth++
-                } catch (e: TimeoutException) {
-                    break
+        when (difficulty) {
+            1 -> return candidates.random()
+            in 2..6 -> return fallbackHeuristicMove(state, candidates, player, opponent)
+            else -> {
+                // Niveaux 7 à 10 : Recherche Minimax avec profondeur et temps de réflexion progressifs
+                val (timeLimitMs, maxDepthAllowed) = when (difficulty) {
+                    7 -> Pair(800L, 2)
+                    8 -> Pair(1200L, 4)
+                    9 -> Pair(1800L, 5)
+                    else -> Pair(2500L, 8)
                 }
+
+                val startTime = System.currentTimeMillis()
+                transpositionTable.clear()
+
+                var bestMove: Position? = null
+                var targetDepth = 1
+
+                while (targetDepth <= maxDepthAllowed && System.currentTimeMillis() - startTime < timeLimitMs) {
+                    try {
+                        val move = searchBestMoveAtDepth(
+                            state = state,
+                            candidates = candidates,
+                            depth = targetDepth,
+                            aiPlayer = player,
+                            startTime = startTime,
+                            timeLimitMs = timeLimitMs
+                        )
+                        if (move != null) {
+                            bestMove = move
+                        }
+                        targetDepth++
+                    } catch (e: TimeoutException) {
+                        break
+                    }
+                }
+
+                return bestMove ?: fallbackHeuristicMove(state, candidates, player, opponent)
             }
-
-            return bestMove ?: fallbackHeuristicMove(state, candidates, player, opponent)
         }
-
-        // Pour les niveaux 2 à 8 : Évaluation Heuristique Optimisée
-        return fallbackHeuristicMove(state, candidates, player, opponent)
     }
 
     private fun searchBestMoveAtDepth(
@@ -418,8 +435,9 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
             return evaluateBoard(state, aiPlayer)
         }
 
-        // Priorisation des mouvements (Élagage rapide)
-        val prioritizedCandidates = prioritizeMoves(state, candidates, currentMover).take(6)
+        // Largeur de recherche augmentée au niveau 9+ pour anticiper les pièges profonds
+        val branchLimit = if (difficulty >= 9) 12 else 6
+        val prioritizedCandidates = prioritizeMoves(state, candidates, currentMover).take(branchLimit)
 
         var varAlpha = alpha
         var varBeta = beta
@@ -519,45 +537,50 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
         val opponent = if (aiPlayer == Player.PLAYER1) Player.PLAYER2 else Player.PLAYER1
         var score = 0.0
 
-        // 1. Équilibre des forces (Score) - Priorité absolue !
+        // 1. Équilibre des forces (Score de capture)
         val aiScore = state.scores[aiPlayer] ?: 0
         val oppScore = state.scores[opponent] ?: 0
         score += (aiScore - oppScore) * weights.captureWeight
 
-        // 2. Contrôle du plateau / Proximité du centre
-        val cx = state.boardSize / 2.0
-        val cy = state.boardSize / 2.0
-        for (e in state.electrons) {
-            if (!e.isCaptured) {
-                val dist = abs(e.position.x - cx.toInt()) + abs(e.position.y - cy.toInt())
-                val positionalValue = maxOf(0.0, state.boardSize.toDouble() - dist)
-                if (e.owner == aiPlayer) {
-                    score += positionalValue * weights.centerWeight
-                } else {
-                    score -= positionalValue * weights.centerWeight
-                }
-            }
-        }
+        // 2. ANALYSE PROFONDE DE CHAQUE ÉLECTRON ENNEMI (Étranglement & Pression constante)
+        val activeElectrons = state.electrons.filter { !it.isCaptured }
+        val activePositions = activeElectrons.map { it.position }.toSet()
+        val oppElectrons = activeElectrons.filter { it.owner == opponent }
+        val aiElectrons = activeElectrons.filter { it.owner == aiPlayer }
 
-        // 3. Mobilité (cases vides d'échappement autour des pions)
-        var aiMobility = 0
-        var oppMobility = 0
-        for (e in state.electrons) {
-            if (!e.isCaptured) {
-                listOf(Pair(1,0), Pair(-1,0), Pair(0,1), Pair(0,-1)).forEach { (dx, dy) ->
-                    val adj = Position(e.position.x + dx, e.position.y + dy)
-                    if (adj.x in 0..state.boardSize && adj.y in 0..state.boardSize) {
-                        if (state.electrons.none { it.position == adj && !it.isCaptured }) {
-                            if (e.owner == aiPlayer) aiMobility++ else oppMobility++
-                        }
+        var oppPressureScore = 0.0
+        for (opp in oppElectrons) {
+            var oppLiberties = 0
+            listOf(Pair(1,0), Pair(-1,0), Pair(0,1), Pair(0,-1)).forEach { (dx, dy) ->
+                val adj = Position(opp.position.x + dx, opp.position.y + dy)
+                if (adj.x in 0..state.boardSize && adj.y in 0..state.boardSize) {
+                    if (!activePositions.contains(adj)) {
+                        oppLiberties++
                     }
                 }
             }
+            // Réduire les libertés de l'ennemi = pression maximale et anticipation d'encerclement
+            if (oppLiberties == 1) {
+                oppPressureScore += 3000.0 // Mettre l'ennemi en danger critique (Atari)
+            } else if (oppLiberties == 0) {
+                oppPressureScore += 8000.0 // Capture imminente
+            } else {
+                oppPressureScore += (4 - oppLiberties) * 250.0
+            }
         }
-        score += (aiMobility - oppMobility) * weights.mobilityWeight
+        score += oppPressureScore
 
-        // 4. Bonus de structure (Angles / Virages) pour encourager l'IA à former des boucles/enclos au lieu de lignes droites
-        val aiPositions = state.electrons.filter { it.owner == aiPlayer && !it.isCaptured }.map { it.position }.toSet()
+        // 3. Contrôle du centre
+        val cx = state.boardSize / 2.0
+        val cy = state.boardSize / 2.0
+        for (e in aiElectrons) {
+            val dist = abs(e.position.x - cx.toInt()) + abs(e.position.y - cy.toInt())
+            val positionalValue = maxOf(0.0, state.boardSize.toDouble() - dist)
+            score += positionalValue * weights.centerWeight
+        }
+
+        // 4. Bonus de structure (Angles / Virages) pour former des boucles
+        val aiPositions = aiElectrons.map { it.position }.toSet()
         var structureBonus = 0.0
         for (p in aiPositions) {
             val hasN = aiPositions.contains(Position(p.x, p.y - 1))
@@ -565,7 +588,7 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
             val hasE = aiPositions.contains(Position(p.x + 1, p.y))
             val hasW = aiPositions.contains(Position(p.x - 1, p.y))
             if ((hasN || hasS) && (hasE || hasW)) {
-                structureBonus += 150.0
+                structureBonus += 200.0
             }
         }
         score += structureBonus
@@ -592,13 +615,10 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
             initialSim.add(Electron("sim", mover, move))
             
             val (captures, postCaptureElectrons) = computeCaptures(state.boardSize, initialSim, move, mover)
+            val netCaptures = captures
             
-            val dummyScores = mutableMapOf(Player.PLAYER1 to 0, Player.PLAYER2 to 0)
-            val finalElectrons = reviveElectrons(state.boardSize, postCaptureElectrons, dummyScores)
-            val netCaptures = captures - (dummyScores[mover] ?: 0)
-            
-            if (netCaptures <= 0 && !hasLiberties(state.boardSize, finalElectrons, move, mover)) {
-                return -1000000000L
+            if (netCaptures <= 0 && !hasLiberties(state.boardSize, postCaptureElectrons, move, mover)) {
+                return -1000000000L // Suicide
             }
             
             var score = 0L
@@ -610,7 +630,7 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
                 for ((dx, dy) in directions) {
                     val adj = Position(move.x + dx, move.y + dy)
                     if (adj.x in 0..state.boardSize && adj.y in 0..state.boardSize) {
-                        if (finalElectrons.none { it.position == adj && !it.isCaptured }) {
+                        if (postCaptureElectrons.none { it.position == adj && !it.isCaptured }) {
                             immediateLiberties++
                         }
                     }
@@ -618,11 +638,11 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
                 score += immediateLiberties * 5000L
             }
 
-            if (difficulty >= 6) {
+            if (difficulty >= 5) {
                 val cx = state.boardSize / 2
                 val cy = state.boardSize / 2
                 val distToCenter = abs(move.x - cx) + abs(move.y - cy)
-                score -= distToCenter * 10L
+                score -= distToCenter * 100L
             }
 
             return score
@@ -638,29 +658,43 @@ class AIEngine(private val difficulty: Int, private val weights: AIWeights = AIW
             var totalScore = myScore
             
             if (oppScoreIfPlayedHere > 0) {
-                val blockWeight = if (difficulty >= 8) 1.2 else 0.9
+                val blockWeight = if (difficulty >= 5) 1.2 else 0.8
                 totalScore += (oppScoreIfPlayedHere * blockWeight).toLong()
             }
 
-            totalScore += (0..100).random()
+            if (difficulty < 6) {
+                totalScore += (0..100).random()
+            }
+
             Pair(pos, totalScore)
         }
 
         val validMoves = scoredMoves.filter { it.second > -500000000L }
         if (validMoves.isEmpty()) return candidates.random()
 
+        val sorted = validMoves.sortedByDescending { it.second }
+
         return when (difficulty) {
-            in 2..3 -> {
-                val sorted = validMoves.sortedByDescending { it.second }
-                val topHalf = sorted.take(maxOf(1, sorted.size / 2))
-                topHalf.random().first
+            2 -> {
+                val topChunk = sorted.take(maxOf(1, (sorted.size * 0.70).toInt()))
+                topChunk.random().first
             }
-            in 4..6 -> {
-                val sorted = validMoves.sortedByDescending { it.second }
+            3 -> {
+                val topChunk = sorted.take(maxOf(1, (sorted.size * 0.40).toInt()))
+                topChunk.random().first
+            }
+            4 -> {
                 sorted.take(3).random().first
             }
+            5 -> {
+                if ((0..100).random() < 15 && sorted.size > 1) {
+                    sorted[1].first
+                } else {
+                    sorted.first().first
+                }
+            }
             else -> {
-                validMoves.maxByOrNull { it.second }?.first ?: candidates.random()
+                sorted.first().first
             }
         }
     }
